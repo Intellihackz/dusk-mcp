@@ -43,7 +43,21 @@ function readDefaultNetwork(): NetworkName {
   return raw as NetworkName;
 }
 
+/** The network the server started with (DUSK_NETWORK). Endpoint overrides apply to it. */
 export const defaultNetwork: NetworkName = readDefaultNetwork();
+
+/**
+ * The network used when a tool call does not name one. It starts as the
+ * default and can be switched for the rest of the session, so a user can say
+ * "use testnet from now on" once instead of repeating it.
+ */
+let sessionNetwork: NetworkName = defaultNetwork;
+
+export const getSessionNetwork = (): NetworkName => sessionNetwork;
+
+export function setSessionNetwork(name: NetworkName): void {
+  sessionNetwork = name;
+}
 
 const trim = (url: string) => url.replace(/\/+$/, "");
 
@@ -53,7 +67,7 @@ const trim = (url: string) => url.replace(/\/+$/, "");
  * serves requests that were meant for the other network.
  */
 export function resolveNetwork(name?: NetworkName): Network {
-  const net = { ...NETWORKS[name ?? defaultNetwork] };
+  const net = { ...NETWORKS[name ?? sessionNetwork] };
   if (net.name === defaultNetwork) {
     if (process.env.DUSK_NODE_URL) net.node = trim(process.env.DUSK_NODE_URL);
     if (process.env.DUSK_EVM_RPC_URL) net.evmRpc = trim(process.env.DUSK_EVM_RPC_URL);

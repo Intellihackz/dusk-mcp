@@ -75,6 +75,16 @@ for (const network of ["mainnet", "devnet"]) {
   }
 }
 
+// Session network: an unnamed call follows the switch, a named call overrides it.
+const chainOf = async (args) => json(await call("dusk_node_info", args))?.chain_id;
+await call("dusk_use_network", { network: "testnet" });
+const followed = (await chainOf({})) === 2;
+const overridden = (await chainOf({ network: "devnet" })) === 3;
+await call("dusk_use_network", { network: "mainnet" });
+const restored = (await chainOf({})) === 1;
+if (!(followed && overridden && restored)) failed++;
+console.log(`${followed && overridden && restored ? "PASS" : "FAIL"} session network switch (follow=${followed} override=${overridden} restore=${restored})\n`);
+
 await call("dusk_docs_index");
 await call("dusk_read_doc", { page: "/developer/duskevm/reference/", max_chars: 1500 });
 await call("dusk_read_doc", { page: "https://example.com/" }, { expectError: true });

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { defaultNetwork, resolveNetwork } from "./config.js";
+import { z } from "zod";
+import { defaultNetwork, getSessionNetwork, NETWORK_NAMES, resolveNetwork, setSessionNetwork } from "./config.js";
+import { tool } from "./util.js";
 import { registerDocsTools } from "./tools/docs.js";
 import { registerEvmTools } from "./tools/evm.js";
 import { registerL1Tools } from "./tools/l1.js";
@@ -16,8 +18,28 @@ const server = new McpServer(
       "Dusk has two layers. The L1 (DuskDS, node software Rusk) runs DuskVM Rust/WASM contracts and uses base58 BLS public keys as accounts, with amounts in LUX (1 DUSK = 1e9 LUX). DuskEVM is an OP Stack EVM layer with 0x addresses and 18-decimal DUSK.",
       "Use dusk_* tools for the L1 and dusk_evm_* tools for DuskEVM. For a DuskVM contract, call dusk_contract_schema before dusk_call_contract.",
       "Only public (Moonlight) balances and transfers are visible. Shielded (Phoenix) activity is private by design.",
-      `Default network: ${defaultNetwork}. Every tool accepts network: "mainnet" | "testnet" | "devnet".`,
+      `Networks: mainnet, testnet, devnet. When the user names a network in a request ("on testnet", "on devnet"), pass it as that tool call's network argument. When they want to switch for everything that follows ("use testnet from now on", "switch to devnet"), call dusk_use_network. When they name none, omit the argument and the session network applies; it starts as ${defaultNetwork}. Always tell the user which network a transfer is on.`,
     ].join("\n"),
+  },
+);
+
+tool(
+  server,
+  "dusk_use_network",
+  "Show or switch the session network: the Dusk network used by every tool call that does not name one. Call with a network when the user wants to work on it from now on (\"switch to testnet\", \"use devnet\"). Call with no arguments to see the current one. A network named in a single request still overrides this.",
+  { network: z.enum(NETWORK_NAMES).optional().describe("Network to switch to. Omit to only show the current one.") },
+  { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  async ({ network }) => {
+    const previous = getSessionNetwork();
+    if (network) setSessionNetwork(network);
+    const net = resolveNetwork();
+    return {
+      sessionNetwork: net.name,
+      changedFrom: network && network !== previous ? previous : undefined,
+      node: net.node,
+      evmRpc: net.evmRpc,
+      note: "Applies to tool calls that do not name a network, until the server restarts.",
+    };
   },
 );
 

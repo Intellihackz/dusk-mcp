@@ -22,7 +22,8 @@ const TRANSFER_GAS_LIMIT = 10_000_000n;
 const PREPARED_TTL_MS = 5 * 60_000;
 
 const mainnetAllowed = process.env.DUSK_ALLOW_MAINNET_SEND === "1";
-const maxSendLux = duskToLux(process.env.DUSK_MAX_SEND_DUSK ?? "100");
+/** Optional per-transfer cap. There is no limit unless DUSK_MAX_SEND_DUSK is set. */
+const maxSendLux = process.env.DUSK_MAX_SEND_DUSK ? duskToLux(process.env.DUSK_MAX_SEND_DUSK) : null;
 
 interface Prepared {
   network: NetworkName;
@@ -148,7 +149,7 @@ export function registerWalletTools(server: McpServer): void {
           testnet: "enabled",
           devnet: "enabled",
           mainnet: mainnetAllowed ? "enabled" : "disabled",
-          maxPerTransferDusk: luxToDusk(maxSendLux),
+          maxPerTransferDusk: maxSendLux === null ? "no limit" : luxToDusk(maxSendLux),
         },
         wallets: rows,
       };
@@ -271,7 +272,7 @@ export function registerWalletTools(server: McpServer): void {
 
       const amountLux = duskToLux(amount_dusk);
       if (amountLux <= 0n) throw new Error("Amount must be greater than zero.");
-      if (amountLux > maxSendLux) {
+      if (maxSendLux !== null && amountLux > maxSendLux) {
         throw new Error(
           `Amount exceeds the per-transfer limit of ${luxToDusk(maxSendLux)} DUSK (DUSK_MAX_SEND_DUSK).`,
         );

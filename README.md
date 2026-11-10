@@ -57,7 +57,13 @@ By default it is read-only: no keys, and nothing can be signed or broadcast. An 
 | `dusk_prepare_transfer` | Ask for the wallet password, sign and preverify a public DUSK transfer, without sending |
 | `dusk_send_transfer` | Broadcast a prepared transfer |
 
-Every network tool takes an optional `network` argument: `"mainnet"`, `"testnet"` or `"devnet"`.
+**Network**
+
+| Tool | What it does |
+|---|---|
+| `dusk_use_network` | Show or switch the session network |
+
+Every network tool takes an optional `network` argument: `"mainnet"`, `"testnet"` or `"devnet"`. In practice you just say it: "show the latest block on testnet" sets it for that request, and "switch to devnet" changes the session network for everything after. With no network named, the session network applies, which starts as `DUSK_NETWORK`.
 
 ## Wallet module
 
@@ -69,7 +75,7 @@ How funds are protected:
 - **Encrypted at rest.** Phrases are stored in `~/.dusk-mcp/wallets.json` with AES-256-GCM, keyed by each wallet's own password through scrypt.
 - **Two steps to send.** `dusk_prepare_transfer` signs, checks balance and limits, and has the node preverify. `dusk_send_transfer` broadcasts exactly that signed transaction. Prepared transfers live in memory for 5 minutes.
 - **Test networks only by default.** Sends work on testnet and devnet. Mainnet sends need `DUSK_ALLOW_MAINNET_SEND=1`.
-- **Per-transfer cap.** `DUSK_MAX_SEND_DUSK`, default 100.
+- **Optional per-transfer cap.** Set `DUSK_MAX_SEND_DUSK` to limit how much one transfer may send. There is no limit by default.
 - **Pinned signing code.** The `wallet-core` WASM driver is vendored in `assets/` and checked against a SHA-256 before use.
 
 ### Wallet passwords
@@ -142,7 +148,7 @@ Claude Desktop, Cursor, and other clients that read an `mcpServers` block:
 | `DUSK_ENABLE_WALLET` | off | Set to `1` to register the wallet tools |
 | `DUSK_WALLET_DIR` | `~/.dusk-mcp` | Where wallets and backups are stored |
 | `DUSK_ALLOW_MAINNET_SEND` | off | Set to `1` to allow mainnet transfers |
-| `DUSK_MAX_SEND_DUSK` | `100` | Largest amount one transfer may send |
+| `DUSK_MAX_SEND_DUSK` | no limit | Largest amount one transfer may send |
 
 ## Known limits
 

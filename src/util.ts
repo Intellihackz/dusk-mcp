@@ -25,7 +25,9 @@ export const networkArg = {
   network: z
     .enum(NETWORK_NAMES)
     .optional()
-    .describe(`Dusk network to query. Defaults to "${defaultNetwork}".`),
+    .describe(
+      `Dusk network to use. Set it whenever the user names one, e.g. "on testnet", "on devnet", "on mainnet". If the user names none, leave it out: the session network applies (starts as "${defaultNetwork}", changed with dusk_use_network).`,
+    ),
 };
 
 function render(data: unknown): string {
