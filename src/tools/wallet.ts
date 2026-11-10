@@ -5,7 +5,17 @@ import { resolveNetwork, TRANSFER_CONTRACT, type Network, type NetworkName } fro
 import { graphql, rues } from "../http.js";
 import { duskToLux, luxToDusk, networkArg, tool } from "../util.js";
 import { accountKind, signTransfer } from "../wallet/signer.js";
-import { createWallet, findWallet, importWallet, listWallets, unlock, WALLET_DIR } from "../wallet/store.js";
+import {
+  assertNameAvailable,
+  createWallet,
+  findWallet,
+  importWallet,
+  listWallets,
+  MIN_PASSWORD_LENGTH,
+  setPassword,
+  unlock,
+  WALLET_DIR,
+} from "../wallet/store.js";
 
 /** A plain transfer spends about 1.85M gas on mainnet. Official wallets use this limit. */
 const TRANSFER_GAS_LIMIT = 10_000_000n;
@@ -57,9 +67,55 @@ async function nonceBase(net: Network, account: string, committed: bigint): Prom
 function assertSendAllowed(net: Network): void {
   if (net.name === "mainnet" && !mainnetAllowed) {
     throw new Error(
-      "Mainnet transfers are disabled. This server only sends on testnet unless DUSK_ALLOW_MAINNET_SEND=1 is set in its environment.",
+      "Mainnet transfers are disabled. This server only sends on testnet and devnet unless DUSK_ALLOW_MAINNET_SEND=1 is set in its environment.",
     );
   }
+}
+
+const passwordArg = (what: string) =>
+  z
+    .string()
+    .optional()
+    .describe(
+      `${what} Leave this out: the server then asks the user for it directly, so it stays out of the conversation. Only pass it if the server reports that it cannot prompt, and never invent one.`,
+    );
+
+/**
+ * Get a wallet password. Prefer asking the user directly through MCP
+ * elicitation, so the password goes from the client's prompt to this process
+ * without the model seeing it. Clients that cannot prompt fall back to the
+ * tool argument, which the agent fills in after asking the user in chat.
+ */
+async function askPassword(
+  server: McpServer,
+  provided: string | undefined,
+  message: string,
+  opts: { confirm?: boolean; label?: string } = {},
+): Promise<string> {
+  if (provided) return provided;
+  const label = opts.label ?? "Wallet password";
+  const properties: Record<string, { type: "string"; title: string; minLength?: number }> = {
+    password: { type: "string", title: label, minLength: opts.confirm ? MIN_PASSWORD_LENGTH : 1 },
+  };
+  if (opts.confirm) properties.confirm = { type: "string", title: `Repeat ${label.toLowerCase()}` };
+
+  if (!server.server.getClientCapabilities()?.elicitation) {
+    throw new Error(
+      `${label} required. This client cannot show a password prompt, so ask the user for it and call this tool again with it as an argument.`,
+    );
+  }
+  const answer = await server.server.elicitInput({
+    message,
+    requestedSchema: { type: "object", properties, required: Object.keys(properties) },
+  });
+  const content = (answer.content ?? {}) as Record<string, unknown>;
+  if (answer.action !== "accept" || typeof content.password !== "string" || !content.password) {
+    throw new Error("Password entry was cancelled. Nothing was done.");
+  }
+  if (opts.confirm && content.confirm !== content.password) {
+    throw new Error("The two passwords did not match. Nothing was done.");
+  }
+  return content.password;
 }
 
 export function registerWalletTools(server: McpServer): void {
@@ -80,6 +136,7 @@ export function registerWalletTools(server: McpServer): void {
             account: w.account,
             balanceDusk: state ? luxToDusk(state.balance) : "unavailable",
             nonce: state ? state.nonce.toString() : null,
+            password: w.hasPassword ? "set" : "NOT SET: run dusk_wallet_set_password before this wallet can send",
             createdAt: w.createdAt,
           };
         }),
@@ -89,6 +146,7 @@ export function registerWalletTools(server: McpServer): void {
         walletDir: WALLET_DIR,
         sending: {
           testnet: "enabled",
+          devnet: "enabled",
           mainnet: mainnetAllowed ? "enabled" : "disabled",
           maxPerTransferDusk: luxToDusk(maxSendLux),
         },
@@ -100,16 +158,26 @@ export function registerWalletTools(server: McpServer): void {
   tool(
     server,
     "dusk_wallet_create",
-    "Create a new local Dusk wallet (public Moonlight account). The recovery phrase is written to a private file on disk and is never returned. Tell the user where the backup file is and that they should move it somewhere safe.",
-    { name: z.string().describe("Short wallet name: lowercase letters, digits, - or _.") },
+    "Create a new local Dusk wallet (public Moonlight account) protected by its own password. The user chooses the password and must enter it again for every transfer. The recovery phrase is written to a private file on disk and is never returned. Tell the user where the backup file is and that they should move it somewhere safe.",
+    {
+      name: z.string().describe("Short wallet name: lowercase letters, digits, - or _."),
+      password: passwordArg(`New password for this wallet, at least ${MIN_PASSWORD_LENGTH} characters.`),
+    },
     { readOnlyHint: false, destructiveHint: false },
-    async ({ name }) => {
-      const wallet = await createWallet(name);
+    async ({ name, password }) => {
+      await assertNameAvailable(name);
+      const chosen = await askPassword(
+        server,
+        password,
+        `Choose a password for the new Dusk wallet "${name}" (at least ${MIN_PASSWORD_LENGTH} characters). You will need it for every transfer. It is not stored and cannot be recovered.`,
+        { confirm: true },
+      );
+      const wallet = await createWallet(name, chosen);
       return {
         name: wallet.name,
         account: wallet.account,
         recoveryPhraseFile: wallet.backupFile,
-        note: "The recovery phrase file is the only backup. Anyone who reads it controls the wallet. The same account works on mainnet and testnet.",
+        note: "The wallet password is not stored anywhere. If it is lost, the recovery phrase file is the only way back. Anyone who reads that file controls the wallet. The same account works on mainnet and testnet.",
       };
     },
   );
@@ -121,10 +189,18 @@ export function registerWalletTools(server: McpServer): void {
     {
       name: z.string().describe("Short wallet name: lowercase letters, digits, - or _."),
       recovery_phrase_file: z.string().describe("Absolute path to a text file holding the recovery phrase."),
+      password: passwordArg(`New password for this wallet, at least ${MIN_PASSWORD_LENGTH} characters.`),
     },
     { readOnlyHint: false, destructiveHint: false },
-    async ({ name, recovery_phrase_file }) => {
-      const wallet = await importWallet(name, recovery_phrase_file);
+    async ({ name, recovery_phrase_file, password }) => {
+      await assertNameAvailable(name);
+      const chosen = await askPassword(
+        server,
+        password,
+        `Choose a password for the imported Dusk wallet "${name}" (at least ${MIN_PASSWORD_LENGTH} characters). You will need it for every transfer.`,
+        { confirm: true },
+      );
+      const wallet = await importWallet(name, recovery_phrase_file, chosen);
       return {
         ...wallet,
         note: "Imported. Consider deleting the source file now that the phrase is stored encrypted.",
@@ -134,22 +210,55 @@ export function registerWalletTools(server: McpServer): void {
 
   tool(
     server,
+    "dusk_wallet_set_password",
+    "Set or change the password of a local Dusk wallet. Changing an existing password requires the current one. Use this for a wallet that reports its password as NOT SET.",
+    {
+      name: z.string().describe("Name of the local wallet."),
+      current_password: passwordArg("Current password, if the wallet has one."),
+      new_password: passwordArg(`New password, at least ${MIN_PASSWORD_LENGTH} characters.`),
+    },
+    { readOnlyHint: false, destructiveHint: false },
+    async ({ name, current_password, new_password }) => {
+      const wallet = await findWallet(name);
+      if (!wallet || wallet.name !== name) throw new Error(`No local wallet named "${name}". Use dusk_wallet_list.`);
+      const current = wallet.hasPassword
+        ? await askPassword(server, current_password, `Enter the CURRENT password for Dusk wallet "${name}".`, {
+            label: "Current password",
+          })
+        : undefined;
+      const next = await askPassword(
+        server,
+        new_password,
+        `Choose a NEW password for Dusk wallet "${name}" (at least ${MIN_PASSWORD_LENGTH} characters). It is not stored and cannot be recovered.`,
+        { confirm: true, label: "New password" },
+      );
+      const updated = await setPassword(name, next, current);
+      return { name: updated.name, account: updated.account, password: "set" };
+    },
+  );
+
+  tool(
+    server,
     "dusk_prepare_transfer",
-    "Prepare a public DUSK transfer on the Dusk L1 from a local wallet. This signs the transaction, checks balance and limits, and asks the node to preverify it, but does NOT broadcast. It returns a summary and a transfer_id. Show the summary to the user, then call dusk_send_transfer to broadcast.",
+    "Prepare a public DUSK transfer on the Dusk L1 from a local wallet. The user must enter the sending wallet's password. This signs the transaction, checks balance and limits, and asks the node to preverify it, but does NOT broadcast. It returns a summary and a transfer_id. Show the summary to the user, then call dusk_send_transfer to broadcast.",
     {
       from: z.string().describe("Name of the local wallet to send from."),
       to: z.string().describe("Recipient: a Dusk account (base58 BLS public key) or the name of another local wallet."),
       amount_dusk: z.string().describe('Amount in DUSK as a decimal string, e.g. "1.5".'),
       memo: z.string().max(512).optional().describe("Optional public memo stored on-chain."),
+      password: passwordArg("Password of the sending wallet."),
       ...networkArg,
     },
     { readOnlyHint: false, destructiveHint: false },
-    async ({ from, to, amount_dusk, memo, network }) => {
+    async ({ from, to, amount_dusk, memo, password, network }) => {
       const net = resolveNetwork(network);
       assertSendAllowed(net);
 
       const sender = await findWallet(from);
       if (!sender) throw new Error(`No local wallet named "${from}". Use dusk_wallet_list.`);
+      if (!sender.hasPassword) {
+        throw new Error(`Wallet "${sender.name}" has no password yet. Set one with dusk_wallet_set_password first.`);
+      }
 
       const recipientWallet = await findWallet(to);
       const recipient = recipientWallet?.account ?? to;
@@ -181,8 +290,15 @@ export function registerWalletTools(server: McpServer): void {
         );
       }
 
+      // Ask only now, after every check has passed, so the user is never
+      // prompted for a transfer that would be refused anyway.
+      const entered = await askPassword(
+        server,
+        password,
+        `Enter the password for Dusk wallet "${sender.name}" to sign: send ${luxToDusk(amountLux)} DUSK on ${net.name} to ${recipientWallet ? `wallet "${recipientWallet.name}"` : `${recipient.slice(0, 12)}...${recipient.slice(-8)}`}. This only prepares the transfer.`,
+      );
       const signed = await signTransfer({
-        mnemonic: await unlock(sender.name),
+        mnemonic: await unlock(sender.name, entered),
         to: recipient,
         amountLux,
         currentNonce: await nonceBase(net, sender.account, state.nonce),

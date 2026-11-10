@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { generateMnemonic, validateMnemonic } from "@scure/bip39";
@@ -8,9 +8,17 @@ import { deriveAccount } from "./signer.js";
 
 export const WALLET_DIR = process.env.DUSK_WALLET_DIR ?? join(homedir(), ".dusk-mcp");
 const STORE_FILE = join(WALLET_DIR, "wallets.json");
-const KEY_FILE = join(WALLET_DIR, "keyfile");
 const BACKUP_DIR = join(WALLET_DIR, "backups");
+/** Only read for wallets created before per-wallet passwords existed. */
+const LEGACY_KEY_FILE = join(WALLET_DIR, "keyfile");
 
+export const MIN_PASSWORD_LENGTH = 8;
+
+/**
+ * "password": encrypted with the wallet's own password, which is never stored.
+ * "keyfile": legacy, encrypted with a key file beside the keystore. Such a
+ * wallet must be given a password before it can sign.
+ */
 type SecretSource = "password" | "keyfile";
 
 interface StoredWallet {
@@ -33,6 +41,7 @@ export interface WalletInfo {
   name: string;
   account: string;
   createdAt: string;
+  hasPassword: boolean;
 }
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -57,32 +66,18 @@ async function load(): Promise<StoreFile> {
   }
 }
 
-/**
- * The secret that protects recovery phrases at rest. A password from the
- * environment is the strong option. Without one, a random key file is created
- * next to the wallets: that stops casual reads and accidental leaks through
- * backups of a single file, but anyone who can read the whole directory can
- * decrypt the wallets.
- */
-async function secret(source: SecretSource): Promise<string> {
-  if (source === "password") {
-    const password = process.env.DUSK_WALLET_PASSWORD;
-    if (!password) {
-      throw new Error("This wallet is protected by DUSK_WALLET_PASSWORD, which is not set for the server.");
-    }
-    return password;
-  }
-  try {
-    return (await readFile(KEY_FILE, "utf8")).trim();
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    const key = randomBytes(32).toString("hex");
-    await ensureDir(WALLET_DIR);
-    await writePrivate(KEY_FILE, key);
-    return key;
+async function save(store: StoreFile): Promise<void> {
+  await ensureDir(WALLET_DIR);
+  await writePrivate(STORE_FILE, JSON.stringify(store, null, 2));
+}
+
+function checkPassword(password: string): void {
+  if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
+    throw new Error(`The wallet password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
   }
 }
 
+/** AES-256-GCM with an scrypt-derived key and a fresh salt per wallet. */
 function seal(mnemonic: string, key: string) {
   const salt = randomBytes(16);
   const iv = randomBytes(12);
@@ -96,7 +91,8 @@ function seal(mnemonic: string, key: string) {
   };
 }
 
-function open(wallet: StoredWallet, key: string): string {
+/** GCM authenticates the ciphertext, so a wrong key fails here instead of yielding garbage. */
+function open(wallet: StoredWallet, key: string): string | null {
   const decipher = createDecipheriv(
     "aes-256-gcm",
     scryptSync(key, Buffer.from(wallet.salt, "hex"), 32),
@@ -106,11 +102,22 @@ function open(wallet: StoredWallet, key: string): string {
   try {
     return Buffer.concat([decipher.update(Buffer.from(wallet.data, "hex")), decipher.final()]).toString("utf8");
   } catch {
-    throw new Error(`Could not decrypt wallet "${wallet.name}". The password or key file does not match.`);
+    return null;
   }
 }
 
-const publicInfo = ({ name, account, createdAt }: StoredWallet): WalletInfo => ({ name, account, createdAt });
+const publicInfo = ({ name, account, createdAt, secretSource }: StoredWallet): WalletInfo => ({
+  name,
+  account,
+  createdAt,
+  hasPassword: secretSource === "password",
+});
+
+function requireWallet(store: StoreFile, name: string): StoredWallet {
+  const wallet = store.wallets.find((w) => w.name === name);
+  if (!wallet) throw new Error(`No wallet named "${name}".`);
+  return wallet;
+}
 
 export async function listWallets(): Promise<WalletInfo[]> {
   return (await load()).wallets.map(publicInfo);
@@ -120,34 +127,43 @@ export async function findWallet(nameOrAccount: string): Promise<WalletInfo | un
   return (await listWallets()).find((w) => w.name === nameOrAccount || w.account === nameOrAccount);
 }
 
-async function add(name: string, mnemonic: string): Promise<WalletInfo> {
+async function add(name: string, mnemonic: string, password: string): Promise<WalletInfo> {
   if (!NAME.test(name)) {
     throw new Error("Wallet name must be 1 to 32 characters: lowercase letters, digits, - or _.");
   }
+  checkPassword(password);
   const store = await load();
   if (store.wallets.some((w) => w.name === name)) throw new Error(`A wallet named "${name}" already exists.`);
   const account = await deriveAccount(mnemonic);
   const existing = store.wallets.find((w) => w.account === account);
   if (existing) throw new Error(`That recovery phrase is already stored as wallet "${existing.name}".`);
 
-  const secretSource: SecretSource = process.env.DUSK_WALLET_PASSWORD ? "password" : "keyfile";
   const wallet: StoredWallet = {
     name,
     account,
     createdAt: new Date().toISOString(),
-    secretSource,
-    ...seal(mnemonic, await secret(secretSource)),
+    secretSource: "password",
+    ...seal(mnemonic, password),
   };
   store.wallets.push(wallet);
-  await ensureDir(WALLET_DIR);
-  await writePrivate(STORE_FILE, JSON.stringify(store, null, 2));
+  await save(store);
   return publicInfo(wallet);
 }
 
+/** Check a name before prompting for a password, so the user is not asked for nothing. */
+export async function assertNameAvailable(name: string): Promise<void> {
+  if (!NAME.test(name)) {
+    throw new Error("Wallet name must be 1 to 32 characters: lowercase letters, digits, - or _.");
+  }
+  if ((await load()).wallets.some((w) => w.name === name)) {
+    throw new Error(`A wallet named "${name}" already exists.`);
+  }
+}
+
 /** Create a wallet. The recovery phrase goes to a private file, never to the caller. */
-export async function createWallet(name: string): Promise<WalletInfo & { backupFile: string }> {
+export async function createWallet(name: string, password: string): Promise<WalletInfo & { backupFile: string }> {
   const mnemonic = generateMnemonic(wordlist, 128);
-  const info = await add(name, mnemonic);
+  const info = await add(name, mnemonic, password);
   await ensureDir(BACKUP_DIR);
   const backupFile = join(BACKUP_DIR, `${name}.recovery-phrase.txt`);
   await writePrivate(backupFile, `${mnemonic}\n`);
@@ -155,17 +171,47 @@ export async function createWallet(name: string): Promise<WalletInfo & { backupF
 }
 
 /** Import a wallet from a file holding a BIP39 recovery phrase. */
-export async function importWallet(name: string, mnemonicFile: string): Promise<WalletInfo> {
+export async function importWallet(name: string, mnemonicFile: string, password: string): Promise<WalletInfo> {
   const mnemonic = (await readFile(mnemonicFile, "utf8")).trim().split(/\s+/).join(" ").toLowerCase();
   if (!validateMnemonic(mnemonic, wordlist)) {
     throw new Error("The file does not contain a valid BIP39 English recovery phrase.");
   }
-  return add(name, mnemonic);
+  return add(name, mnemonic, password);
 }
 
 /** Decrypt a wallet's recovery phrase for signing. Callers must not return or log it. */
-export async function unlock(name: string): Promise<string> {
-  const wallet = (await load()).wallets.find((w) => w.name === name);
-  if (!wallet) throw new Error(`No wallet named "${name}".`);
-  return open(wallet, await secret(wallet.secretSource));
+export async function unlock(name: string, password: string): Promise<string> {
+  const wallet = requireWallet(await load(), name);
+  if (wallet.secretSource !== "password") {
+    throw new Error(`Wallet "${name}" has no password yet. Set one with dusk_wallet_set_password first.`);
+  }
+  const mnemonic = open(wallet, password);
+  if (mnemonic === null) throw new Error(`Wrong password for wallet "${name}".`);
+  return mnemonic;
+}
+
+/**
+ * Set or change a wallet's password. A wallet that already has one needs the
+ * current password. A legacy key-file wallet is converted, and the key file
+ * is removed once no wallet depends on it.
+ */
+export async function setPassword(name: string, newPassword: string, currentPassword?: string): Promise<WalletInfo> {
+  checkPassword(newPassword);
+  const store = await load();
+  const wallet = requireWallet(store, name);
+
+  let mnemonic: string | null;
+  if (wallet.secretSource === "password") {
+    if (!currentPassword) throw new Error(`Wallet "${name}" already has a password. The current password is required to change it.`);
+    mnemonic = open(wallet, currentPassword);
+    if (mnemonic === null) throw new Error(`Wrong current password for wallet "${name}".`);
+  } else {
+    mnemonic = open(wallet, (await readFile(LEGACY_KEY_FILE, "utf8")).trim());
+    if (mnemonic === null) throw new Error(`Could not read legacy wallet "${name}". Restore it from its recovery phrase.`);
+  }
+
+  Object.assign(wallet, seal(mnemonic, newPassword), { secretSource: "password" });
+  await save(store);
+  if (!store.wallets.some((w) => w.secretSource === "keyfile")) await rm(LEGACY_KEY_FILE, { force: true });
+  return publicInfo(wallet);
 }

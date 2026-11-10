@@ -28,6 +28,21 @@ function unwrapJson(value: unknown): unknown {
   }
 }
 
+/**
+ * The node returns memo bytes hex-encoded. Add a readable `memoText` when the
+ * bytes are printable UTF-8, and leave binary memos as hex only.
+ */
+function withMemoText<T extends { memo?: string | null }>(tx: T): T & { memoText?: string } {
+  if (!tx?.memo || !/^([0-9a-f]{2})+$/i.test(tx.memo)) return tx;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(tx.memo, "hex"));
+    // Reject control characters so a binary memo is never shown as garbled text.
+    return /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text) ? tx : { ...tx, memoText: text };
+  } catch {
+    return tx;
+  }
+}
+
 const TX_SUMMARY = `id txType gasLimit gasPrice isDeploy memo callData { contractId fnName }`;
 
 export function registerL1Tools(server: McpServer): void {
@@ -115,7 +130,10 @@ export function registerL1Tools(server: McpServer): void {
         vars,
       );
       if (!data.block) throw new Error("Block not found.");
-      return data.block;
+      return {
+        ...data.block,
+        transactions: (data.block.transactions as any[]).map((t) => ({ ...t, tx: withMemoText(t.tx) })),
+      };
     },
   );
 
@@ -170,7 +188,7 @@ export function registerL1Tools(server: McpServer): void {
       );
       if (data.tx) {
         const { json, ...summary } = data.tx.tx;
-        return { state: "included", ...data.tx, tx: summary, details: unwrapJson(json) };
+        return { state: "included", ...data.tx, tx: withMemoText(summary), details: unwrapJson(json) };
       }
       const pending = await graphql(
         net,
@@ -179,7 +197,7 @@ export function registerL1Tools(server: McpServer): void {
       );
       if (pending.mempoolTx) {
         const { json, ...summary } = pending.mempoolTx;
-        return { state: "pending", tx: summary, details: unwrapJson(json) };
+        return { state: "pending", tx: withMemoText(summary), details: unwrapJson(json) };
       }
       throw new Error(
         "Transaction not found in the chain or in this node's mempool. The mempool view is local to one node, not network-wide.",
@@ -194,7 +212,7 @@ export function registerL1Tools(server: McpServer): void {
     { ...networkArg },
     async ({ network }) => {
       const data = await graphql(resolveNetwork(network), `{ mempoolTxs { ${TX_SUMMARY} } }`);
-      return { count: data.mempoolTxs.length, transactions: data.mempoolTxs };
+      return { count: data.mempoolTxs.length, transactions: (data.mempoolTxs as any[]).map(withMemoText) };
     },
   );
 

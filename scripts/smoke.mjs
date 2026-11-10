@@ -63,12 +63,16 @@ await call("dusk_node_info", { network: "testnet" });
 await call("dusk_evm_info", { network: "testnet" });
 await call("dusk_evm_get_account", { address: "0x4200000000000000000000000000000000000006", network: "testnet" });
 await call("dusk_evm_rpc", { method: "eth_getBlockByNumber", params: ["latest", false], network: "testnet" });
-// Informational: the mainnet DuskEVM RPC has been unreachable over verified TLS.
-const failedBefore = failed;
-await call("dusk_evm_info", { network: "mainnet" });
-if (failed > failedBefore) {
-  failed = failedBefore;
-  console.log("WARN mainnet DuskEVM RPC is not reachable; not counted as a failure\n");
+await call("dusk_node_info", { network: "devnet" });
+// Informational: these public DuskEVM endpoints have been unreachable
+// (mainnet serves an unverifiable TLS certificate, devnet returns 503).
+for (const network of ["mainnet", "devnet"]) {
+  const failedBefore = failed;
+  await call("dusk_evm_info", { network });
+  if (failed > failedBefore) {
+    failed = failedBefore;
+    console.log(`WARN ${network} DuskEVM RPC is not reachable; not counted as a failure\n`);
+  }
 }
 
 await call("dusk_docs_index");

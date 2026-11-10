@@ -1,4 +1,5 @@
-export type NetworkName = "mainnet" | "testnet";
+export const NETWORK_NAMES = ["mainnet", "testnet", "devnet"] as const;
+export type NetworkName = (typeof NETWORK_NAMES)[number];
 
 export interface Network {
   name: NetworkName;
@@ -25,14 +26,21 @@ const NETWORKS: Record<NetworkName, Network> = {
     evmChainId: 745,
     evmExplorer: "https://explorer.testnet.evm.dusk.network",
   },
+  devnet: {
+    name: "devnet",
+    node: "https://devnet.nodes.dusk.network",
+    evmRpc: "https://rpc.devnet.evm.dusk.network",
+    evmChainId: 310,
+    evmExplorer: "https://explorer.devnet.evm.dusk.network",
+  },
 };
 
 function readDefaultNetwork(): NetworkName {
   const raw = (process.env.DUSK_NETWORK ?? "mainnet").toLowerCase();
-  if (raw !== "mainnet" && raw !== "testnet") {
-    throw new Error(`DUSK_NETWORK must be "mainnet" or "testnet", got "${raw}"`);
+  if (!(NETWORK_NAMES as readonly string[]).includes(raw)) {
+    throw new Error(`DUSK_NETWORK must be one of ${NETWORK_NAMES.join(", ")}, got "${raw}"`);
   }
-  return raw;
+  return raw as NetworkName;
 }
 
 export const defaultNetwork: NetworkName = readDefaultNetwork();

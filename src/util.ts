@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { defaultNetwork } from "./config.js";
+import { defaultNetwork, NETWORK_NAMES } from "./config.js";
 
 const LUX_PER_DUSK = 1_000_000_000n;
 const MAX_CHARS = 60_000;
@@ -23,7 +23,7 @@ export function duskToLux(amount: string): bigint {
 /** Shared optional argument: every tool can target either network. */
 export const networkArg = {
   network: z
-    .enum(["mainnet", "testnet"])
+    .enum(NETWORK_NAMES)
     .optional()
     .describe(`Dusk network to query. Defaults to "${defaultNetwork}".`),
 };
